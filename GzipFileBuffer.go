@@ -288,14 +288,7 @@ func (fb *FileBuffer) write(data []byte) error {
 				fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
 			}
 		}
-
-		// Write data to gzip writer
-		n, err := fb.gzipWriter.Write(data)
-		if err != nil {
-			return fmt.Errorf("writing to gzip: %w", err)
-		}
-		data = data[n:]
-
+		
 		// Flush to ensure data is written to file
 		if err := fb.gzipWriter.Flush(); err != nil {
 			return fmt.Errorf("flushing gzip writer: %w", err)
@@ -320,6 +313,13 @@ func (fb *FileBuffer) write(data []byte) error {
 				}
 			}
 		}
+
+		// Write data to gzip writer
+		n, err := fb.gzipWriter.Write(data)
+		if err != nil {
+			return fmt.Errorf("writing to gzip: %w", err)
+		}
+		data = data[n:]
 	}
 	return nil
 }
