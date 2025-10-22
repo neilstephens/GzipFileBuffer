@@ -27,7 +27,7 @@ type FileBuffer struct {
 }
 
 func main() {
-	fileSize := flag.Int64("file_size", 0, "Maximum size per file in bytes (required)")
+	fileSizeKB := flag.Int64("file_size", 0, "Maximum size per file in kilobytes (required)")
 	numFiles := flag.Int("num_files", 0, "Maximum number of files to keep (required)")
 	filePrefix := flag.String("file_prefix", "", "Prefix for output files (required)")
 	timeFormat := flag.String("time_format", "2006-01-02T15:04:05.000Z", "Time format for filenames (Go time layout)")
@@ -45,9 +45,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  prefix_NNNNNN_TIMESTAMP[.ext].gz\n")
 		fmt.Fprintf(os.Stderr, "  where NNNNNN is a zero-padded counter\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
-		fmt.Fprintf(os.Stderr, "  cat data.bin | %s --file_size 10485760 --num_files 5 --file_prefix output\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  cat logs.txt | %s --file_size 52428800 --num_files 10 --file_prefix logs.txt\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  cat stream | %s --file_size 1048576 --num_files 3 --file_prefix data --time_format 20060102-150405\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  cat data.bin | %s --file_size 10240 --num_files 5 --file_prefix output\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  cat logs.txt | %s --file_size 51200 --num_files 10 --file_prefix logs.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  cat stream | %s --file_size 1024 --num_files 3 --file_prefix data --time_format 20060102-150405\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Time Format:\n")
 		fmt.Fprintf(os.Stderr, "  Uses Go time layout format. Default is ISO 8601: 2006-01-02T15:04:05.000Z\n")
 		fmt.Fprintf(os.Stderr, "  Common formats:\n")
@@ -65,7 +65,7 @@ func main() {
 	}
 
 	// Validate required arguments
-	if *fileSize <= 0 {
+	if *fileSizeKB <= 0 {
 		fmt.Fprintln(os.Stderr, "Error: --file_size is required and must be positive")
 		flag.Usage()
 		os.Exit(1)
@@ -89,7 +89,7 @@ func main() {
 
 	fb := &FileBuffer{
 		filePrefix:  *filePrefix,
-		maxFileSize: *fileSize,
+		maxFileSize: *fileSizeKB * 1024, // Convert KB to bytes
 		maxNumFiles: *numFiles,
 		timeFormat:  *timeFormat,
 		activeFiles: make([]string, 0, *numFiles),
