@@ -133,33 +133,37 @@ func (fb *FileBuffer) run() error {
 
 func (fb *FileBuffer) write(data []byte) error {
 	for len(data) > 0 {
-		// Open new file if needed
-		if fb.gzipWriter == nil {
+		// Open new file if needed (both file and gzip writer must be nil)
+		if fb.currentFile == nil || fb.gzipWriter == nil {
 			if err := fb.openNewFile(); err != nil {
 				return err
 			}
 		}
 
-		// Calculate how much we can write to current file
-		remaining := fb.maxFileSize - fb.currentSize
-		toWrite := int64(len(data))
-		if toWrite > remaining {
-			toWrite = remaining
-		}
-
-		// Write data
-		n, err := fb.gzipWriter.Write(data[:toWrite])
+		// Write data to gzip writer
+		n, err := fb.gzipWriter.Write(data)
 		if err != nil {
 			return fmt.Errorf("writing to gzip: %w", err)
 		}
-		fb.currentSize += int64(n)
-		data = data[toWrite:]
+		data = data[n:]
 
-		// Close file if it reached max size
-		if fb.currentSize >= fb.maxFileSize {
+		// Flush to ensure data is written to file
+		if err := fb.gzipWriter.Flush(); err != nil {
+			return fmt.Errorf("flushing gzip writer: %w", err)
+		}
+
+		// Check actual file size on disk
+		fileInfo, err := fb.currentFile.Stat()
+		if err != nil {
+			return fmt.Errorf("getting file stats: %w", err)
+		}
+
+		// Close file if it reached max size and start a new one on next iteration
+		if fileInfo.Size() >= fb.maxFileSize {
 			if err := fb.closeCurrentFile(); err != nil {
 				return err
 			}
+			// File and gzip writer are now nil, will be recreated on next loop iteration
 		}
 	}
 	return nil
@@ -184,11 +188,14 @@ func (fb *FileBuffer) openNewFile() error {
 		return fmt.Errorf("creating file %s: %w", filename, err)
 	}
 
+	// Store file handle and create NEW gzip writer for this file
 	fb.currentFile = f
-	fb.gzipWriter = gzip.NewWriter(f)
+	fb.gzipWriter = gzip.NewWriter(f) // Creates a fresh gzip writer with new header
 	fb.currentSize = 0
 	fb.fileCounter++
 	fb.activeFiles = append(fb.activeFiles, filename)
+
+	fmt.Fprintf(os.Stderr, "Created new file: %s (counter: %d)\n", filename, fb.fileCounter)
 
 	return nil
 }
