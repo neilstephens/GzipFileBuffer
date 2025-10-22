@@ -19,6 +19,9 @@ type FileBuffer struct {
 	maxFileSize   int64
 	maxNumFiles   int
 	timeFormat    string
+	headerBytes   int
+	header        []byte
+	headerCaptured bool
 	currentFile   *os.File
 	gzipWriter    *gzip.Writer
 	currentSize   int64
@@ -31,6 +34,7 @@ func main() {
 	numFiles := flag.Int("num_files", 0, "Maximum number of files to keep (required)")
 	filePrefix := flag.String("file_prefix", "", "Prefix for output files (required)")
 	timeFormat := flag.String("time_format", "2006-01-02T15:04:05.000Z", "Time format for filenames (Go time layout)")
+	headerBytes := flag.Int("header_bytes", 0, "Number of bytes from start of stream to copy as header for each file (default: 0)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
 
 	flag.Usage = func() {
@@ -47,13 +51,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  cat data.bin | %s --file_size 10240 --num_files 5 --file_prefix output\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  cat logs.txt | %s --file_size 51200 --num_files 10 --file_prefix logs.txt\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  cat stream | %s --file_size 1024 --num_files 3 --file_prefix data --time_format 20060102-150405\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  cat stream | %s --file_size 1024 --num_files 3 --file_prefix data --time_format 20060102-150405\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  cat video.mp4 | %s --file_size 102400 --num_files 5 --file_prefix video.mp4 --header_bytes 1024\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Time Format:\n")
 		fmt.Fprintf(os.Stderr, "  Uses Go time layout format. Default is ISO 8601: 2006-01-02T15:04:05.000Z\n")
 		fmt.Fprintf(os.Stderr, "  Common formats:\n")
 		fmt.Fprintf(os.Stderr, "    ISO 8601:     2006-01-02T15:04:05.000Z\n")
 		fmt.Fprintf(os.Stderr, "    Simple:       20060102-150405\n")
 		fmt.Fprintf(os.Stderr, "    Unix seconds: (use custom script for epoch time)\n\n")
+		fmt.Fprintf(os.Stderr, "Header Bytes:\n")
+		fmt.Fprintf(os.Stderr, "  Captures the first N bytes of the input stream and prepends them to each\n")
+		fmt.Fprintf(os.Stderr, "  subsequent file (after the first). Useful for formats that require headers\n")
+		fmt.Fprintf(os.Stderr, "  (e.g., video containers, serialization formats). Set to 0 to disable.\n\n")
 	}
 
 	flag.Parse()
@@ -86,12 +95,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: --time_format cannot be empty")
 		os.Exit(1)
 	}
+	if *headerBytes < 0 {
+		fmt.Fprintln(os.Stderr, "Error: --header_bytes cannot be negative")
+		os.Exit(1)
+	}
 
 	fb := &FileBuffer{
 		filePrefix:  *filePrefix,
 		maxFileSize: *fileSizeKB * 1024, // Convert KB to bytes
 		maxNumFiles: *numFiles,
 		timeFormat:  *timeFormat,
+		headerBytes: *headerBytes,
 		activeFiles: make([]string, 0, *numFiles),
 	}
 
@@ -132,11 +146,31 @@ func (fb *FileBuffer) run() error {
 }
 
 func (fb *FileBuffer) write(data []byte) error {
+	// Capture header from first data if needed
+	if !fb.headerCaptured && fb.headerBytes > 0 {
+		bytesToCapture := fb.headerBytes
+		if bytesToCapture > len(data) {
+			bytesToCapture = len(data)
+		}
+		fb.header = make([]byte, bytesToCapture)
+		copy(fb.header, data[:bytesToCapture])
+		fb.headerCaptured = true
+		fmt.Fprintf(os.Stderr, "Captured %d header bytes from stream\n", bytesToCapture)
+	}
+
 	for len(data) > 0 {
 		// Open new file if needed (both file and gzip writer must be nil)
 		if fb.currentFile == nil || fb.gzipWriter == nil {
 			if err := fb.openNewFile(); err != nil {
 				return err
+			}
+			
+			// Write header to new file (except for the very first file which already has it)
+			if fb.fileCounter > 1 && len(fb.header) > 0 {
+				if _, err := fb.gzipWriter.Write(fb.header); err != nil {
+					return fmt.Errorf("writing header to new file: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
 			}
 		}
 
