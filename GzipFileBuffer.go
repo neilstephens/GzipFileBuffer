@@ -48,6 +48,7 @@ type FileBuffer struct {
 	header          []byte
 	headerCaptured  bool
 	blockFormat     *BlockHeaderFormat
+	maxBlockSize    int
 	pendingData     []byte // Buffer for data while searching for block boundary
 	currentFile     *os.File
 	gzipWriter      *gzip.Writer
@@ -56,8 +57,6 @@ type FileBuffer struct {
 	activeFiles     []string
 }
 
-const maxBlockSize = 262144 // 256KB
-
 func main() {
 	fileSizeKB := flag.Int64("file_size", 0, "Maximum size per file in kilobytes (required)")
 	numFiles := flag.Int("num_files", 0, "Maximum number of files to keep (required)")
@@ -65,6 +64,7 @@ func main() {
 	timeFormat := flag.String("time_format", "2006-01-02T15:04:05.000Z", "Time format for filenames (Go time layout)")
 	headerBytes := flag.Int("header_bytes", 0, "Number of bytes from start of stream to copy as header for each file (default: 0)")
 	blockHeader := flag.String("block_header", "", "Block header format for boundary detection (e.g., <u32:sec><u32:usec><u32:length><u32>)")
+	maxBlockSize := flag.Int("max_block_size", 262144, "Maximum block size in bytes when scanning for boundaries (default: 262144 / 256KB)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
 
 	flag.Usage = func() {
@@ -99,7 +99,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "    sec     - Unix timestamp seconds (validated within ±48 hours)\n")
 		fmt.Fprintf(os.Stderr, "    usec    - Microseconds (0-999999)\n")
 		fmt.Fprintf(os.Stderr, "    nsec    - Nanoseconds (0-999999999)\n")
-		fmt.Fprintf(os.Stderr, "    length  - Block data length in bytes (0-262144)\n")
+		fmt.Fprintf(os.Stderr, "    length  - Block data length in bytes (0-%d, configurable with --max_block_size)\n", 262144)
 		fmt.Fprintf(os.Stderr, "    0xHEX   - Magic number (exact match required)\n")
 		fmt.Fprintf(os.Stderr, "    (none)  - Any value (ignored)\n")
 		fmt.Fprintf(os.Stderr, "  Example for pcap: <u32:sec><u32:usec><u32:length><u32>\n")
@@ -140,15 +140,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: --header_bytes cannot be negative")
 		os.Exit(1)
 	}
+	if *maxBlockSize <= 0 {
+		fmt.Fprintln(os.Stderr, "Error: --max_block_size must be positive")
+		os.Exit(1)
+	}
 
 	fb := &FileBuffer{
-		filePrefix:  *filePrefix,
-		maxFileSize: *fileSizeKB * 1024, // Convert KB to bytes
-		maxNumFiles: *numFiles,
-		timeFormat:  *timeFormat,
-		headerBytes: *headerBytes,
-		activeFiles: make([]string, 0, *numFiles),
-		pendingData: make([]byte, 0),
+		filePrefix:   *filePrefix,
+		maxFileSize:  *fileSizeKB * 1024, // Convert KB to bytes
+		maxNumFiles:  *numFiles,
+		timeFormat:   *timeFormat,
+		headerBytes:  *headerBytes,
+		maxBlockSize: *maxBlockSize,
+		activeFiles:  make([]string, 0, *numFiles),
+		pendingData:  make([]byte, 0),
 	}
 
 	// Parse block header format if provided
@@ -325,21 +330,18 @@ func (fb *FileBuffer) write(data []byte) error {
 }
 
 func (fb *FileBuffer) flushPendingData() error {
-	fmt.Fprintf(os.Stderr, "Info: Searching %d bytes for block boundry.\n",len(fb.pendingData))
 	// Try to find a valid block header in pending data
 	if fb.blockFormat == nil {
 		return fmt.Errorf("internal error: flushPendingData called without block format")
 	}
 
-	maxScanSize := maxBlockSize + fb.blockFormat.TotalBytes
+	maxScanSize := fb.maxBlockSize + fb.blockFormat.TotalBytes
 	
 	// Search for valid block header
 	for offset := 0; offset <= len(fb.pendingData)-fb.blockFormat.TotalBytes; offset++ {
 		if blockLen, valid := fb.validateBlockHeader(fb.pendingData[offset:]); valid {
 			// Found valid header! Write until end of this block
 			endOfBlock := offset + fb.blockFormat.TotalBytes + blockLen
-			
-			fmt.Fprintf(os.Stderr, "Info: Found valid header at offset %d\n", endOfBlock)
 			
 			if endOfBlock > len(fb.pendingData) {
 				// Need more data to complete this block
@@ -448,7 +450,7 @@ func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
 				return 0, false
 			}
 		case FieldLength:
-			if value > maxBlockSize {
+			if value > uint64(fb.maxBlockSize) {
 				return 0, false
 			}
 			blockLength = int(value)
