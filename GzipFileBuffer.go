@@ -2,6 +2,7 @@ package main
 
 import (
 	"compress/gzip"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
@@ -14,20 +15,48 @@ import (
 	"time"
 )
 
-type FileBuffer struct {
-	filePrefix    string
-	maxFileSize   int64
-	maxNumFiles   int
-	timeFormat    string
-	headerBytes   int
-	header        []byte
-	headerCaptured bool
-	currentFile   *os.File
-	gzipWriter    *gzip.Writer
-	currentSize   int64
-	fileCounter   int
-	activeFiles   []string
+type FieldType int
+
+const (
+	FieldSec FieldType = iota
+	FieldUsec
+	FieldNsec
+	FieldLength
+	FieldMagic
+	FieldIgnore
+)
+
+type HeaderField struct {
+	Width     int       // 16, 32, 64 bits
+	Type      FieldType
+	MagicValue uint64   // For magic number fields
 }
+
+type BlockHeaderFormat struct {
+	Fields       []HeaderField
+	TotalBytes   int
+	HasLength    bool
+	LengthIndex  int
+}
+
+type FileBuffer struct {
+	filePrefix      string
+	maxFileSize     int64
+	maxNumFiles     int
+	timeFormat      string
+	headerBytes     int
+	header          []byte
+	headerCaptured  bool
+	blockFormat     *BlockHeaderFormat
+	pendingData     []byte // Buffer for data while searching for block boundary
+	currentFile     *os.File
+	gzipWriter      *gzip.Writer
+	currentSize     int64
+	fileCounter     int
+	activeFiles     []string
+}
+
+const maxBlockSize = 262144 // 256KB
 
 func main() {
 	fileSizeKB := flag.Int64("file_size", 0, "Maximum size per file in kilobytes (required)")
@@ -35,6 +64,7 @@ func main() {
 	filePrefix := flag.String("file_prefix", "", "Prefix for output files (required)")
 	timeFormat := flag.String("time_format", "2006-01-02T15:04:05.000Z", "Time format for filenames (Go time layout)")
 	headerBytes := flag.Int("header_bytes", 0, "Number of bytes from start of stream to copy as header for each file (default: 0)")
+	blockHeader := flag.String("block_header", "", "Block header format for boundary detection (e.g., <u32:sec><u32:usec><u32:length><u32>)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
 
 	flag.Usage = func() {
@@ -52,17 +82,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cat data.bin | %s --file_size 10240 --num_files 5 --file_prefix output\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  cat logs.txt | %s --file_size 51200 --num_files 10 --file_prefix logs.txt\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  cat stream | %s --file_size 1024 --num_files 3 --file_prefix data --time_format 20060102-150405\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  cat video.mp4 | %s --file_size 102400 --num_files 5 --file_prefix video.mp4 --header_bytes 1024\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  cat video.mp4 | %s --file_size 102400 --num_files 5 --file_prefix video.mp4 --header_bytes 1024\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  tcpdump -w - | %s --file_size 102400 --num_files 10 --file_prefix capture.pcap --block_header '<u32:sec><u32:usec><u32:length><u32>'\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Time Format:\n")
 		fmt.Fprintf(os.Stderr, "  Uses Go time layout format. Default is ISO 8601: 2006-01-02T15:04:05.000Z\n")
 		fmt.Fprintf(os.Stderr, "  Common formats:\n")
 		fmt.Fprintf(os.Stderr, "    ISO 8601:     2006-01-02T15:04:05.000Z\n")
-		fmt.Fprintf(os.Stderr, "    Simple:       20060102-150405\n")
-		fmt.Fprintf(os.Stderr, "    Unix seconds: (use custom script for epoch time)\n\n")
+		fmt.Fprintf(os.Stderr, "    Simple:       20060102-150405\n\n")
 		fmt.Fprintf(os.Stderr, "Header Bytes:\n")
 		fmt.Fprintf(os.Stderr, "  Captures the first N bytes of the input stream and prepends them to each\n")
 		fmt.Fprintf(os.Stderr, "  subsequent file (after the first). Useful for formats that require headers\n")
 		fmt.Fprintf(os.Stderr, "  (e.g., video containers, serialization formats). Set to 0 to disable.\n\n")
+		fmt.Fprintf(os.Stderr, "Block Header Format:\n")
+		fmt.Fprintf(os.Stderr, "  Specifies block/packet boundary detection to avoid splitting mid-block.\n")
+		fmt.Fprintf(os.Stderr, "  Format: <uN:type> where N is bit width (16, 32, 64) and type is:\n")
+		fmt.Fprintf(os.Stderr, "    sec     - Unix timestamp seconds (validated within ±48 hours)\n")
+		fmt.Fprintf(os.Stderr, "    usec    - Microseconds (0-999999)\n")
+		fmt.Fprintf(os.Stderr, "    nsec    - Nanoseconds (0-999999999)\n")
+		fmt.Fprintf(os.Stderr, "    length  - Block data length in bytes (0-262144)\n")
+		fmt.Fprintf(os.Stderr, "    0xHEX   - Magic number (exact match required)\n")
+		fmt.Fprintf(os.Stderr, "    (none)  - Any value (ignored)\n")
+		fmt.Fprintf(os.Stderr, "  Example for pcap: <u32:sec><u32:usec><u32:length><u32>\n")
+		fmt.Fprintf(os.Stderr, "  All multi-byte values are assumed little-endian.\n\n")
 	}
 
 	flag.Parse()
@@ -107,6 +148,18 @@ func main() {
 		timeFormat:  *timeFormat,
 		headerBytes: *headerBytes,
 		activeFiles: make([]string, 0, *numFiles),
+		pendingData: make([]byte, 0),
+	}
+
+	// Parse block header format if provided
+	if *blockHeader != "" {
+		format, err := parseBlockHeaderFormat(*blockHeader)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing block header format: %v\n", err)
+			os.Exit(1)
+		}
+		fb.blockFormat = format
+		fmt.Fprintf(os.Stderr, "Block header format: %d bytes, %d fields\n", format.TotalBytes, len(format.Fields))
 	}
 
 	// Resume from existing files if requested
@@ -121,6 +174,62 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func parseBlockHeaderFormat(format string) (*BlockHeaderFormat, error) {
+	result := &BlockHeaderFormat{
+		Fields: make([]HeaderField, 0),
+	}
+
+	// Parse format like <u32:sec><u32:usec><u32:length><u32>
+	re := regexp.MustCompile(`<u(\d+)(?::([^>]+))?>`)
+	matches := re.FindAllStringSubmatch(format, -1)
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no valid field specifications found")
+	}
+
+	for i, match := range matches {
+		width, err := strconv.Atoi(match[1])
+		if err != nil || (width != 16 && width != 32 && width != 64) {
+			return nil, fmt.Errorf("invalid bit width: %s (must be 16, 32, or 64)", match[1])
+		}
+
+		field := HeaderField{
+			Width: width,
+			Type:  FieldIgnore,
+		}
+
+		if len(match) > 2 && match[2] != "" {
+			typeStr := match[2]
+			switch {
+			case typeStr == "sec":
+				field.Type = FieldSec
+			case typeStr == "usec":
+				field.Type = FieldUsec
+			case typeStr == "nsec":
+				field.Type = FieldNsec
+			case typeStr == "length":
+				field.Type = FieldLength
+				result.HasLength = true
+				result.LengthIndex = i
+			case strings.HasPrefix(typeStr, "0x"):
+				field.Type = FieldMagic
+				val, err := strconv.ParseUint(typeStr[2:], 16, 64)
+				if err != nil {
+					return nil, fmt.Errorf("invalid hex value: %s", typeStr)
+				}
+				field.MagicValue = val
+			default:
+				return nil, fmt.Errorf("unknown field type: %s", typeStr)
+			}
+		}
+
+		result.Fields = append(result.Fields, field)
+		result.TotalBytes += width / 8
+	}
+
+	return result, nil
 }
 
 func (fb *FileBuffer) run() error {
@@ -158,6 +267,12 @@ func (fb *FileBuffer) write(data []byte) error {
 		fmt.Fprintf(os.Stderr, "Captured %d header bytes from stream\n", bytesToCapture)
 	}
 
+	// Add data to pending buffer if we're searching for block boundary
+	if len(fb.pendingData) > 0 {
+		fb.pendingData = append(fb.pendingData, data...)
+		return fb.flushPendingData()
+	}
+
 	for len(data) > 0 {
 		// Open new file if needed (both file and gzip writer must be nil)
 		if fb.currentFile == nil || fb.gzipWriter == nil {
@@ -192,15 +307,166 @@ func (fb *FileBuffer) write(data []byte) error {
 			return fmt.Errorf("getting file stats: %w", err)
 		}
 
-		// Close file if it reached max size and start a new one on next iteration
+		// Check if we need to start looking for block boundary
 		if fileInfo.Size() >= fb.maxFileSize {
-			if err := fb.closeCurrentFile(); err != nil {
-				return err
+			if fb.blockFormat != nil {
+				// Start buffering data to find block boundary
+				fb.pendingData = append(fb.pendingData, data...)
+				return fb.flushPendingData()
+			} else {
+				// No block format, just close immediately
+				if err := fb.closeCurrentFile(); err != nil {
+					return err
+				}
 			}
-			// File and gzip writer are now nil, will be recreated on next loop iteration
 		}
 	}
 	return nil
+}
+
+func (fb *FileBuffer) flushPendingData() error {
+	fmt.Fprintf(os.Stderr, "Info: Searching %d bytes for block boundry.\n",len(fb.pendingData))
+	// Try to find a valid block header in pending data
+	if fb.blockFormat == nil {
+		return fmt.Errorf("internal error: flushPendingData called without block format")
+	}
+
+	maxScanSize := maxBlockSize + fb.blockFormat.TotalBytes
+	
+	// Search for valid block header
+	for offset := 0; offset <= len(fb.pendingData)-fb.blockFormat.TotalBytes; offset++ {
+		if blockLen, valid := fb.validateBlockHeader(fb.pendingData[offset:]); valid {
+			// Found valid header! Write until end of this block
+			endOfBlock := offset + fb.blockFormat.TotalBytes + blockLen
+			
+			fmt.Fprintf(os.Stderr, "Info: Found valid header at offset %d\n", endOfBlock)
+			
+			if endOfBlock > len(fb.pendingData) {
+				// Need more data to complete this block
+				if len(fb.pendingData) > maxScanSize {
+					// Scanned too far without finding complete block
+					fmt.Fprintf(os.Stderr, "Warning: no complete block found within %d bytes, forcing rotation\n", maxScanSize)
+					return fb.forceRotation()
+				}
+				// Wait for more data
+				return nil
+			}
+
+			// Write everything up to and including this block
+			if _, err := fb.gzipWriter.Write(fb.pendingData[:endOfBlock]); err != nil {
+				return fmt.Errorf("writing pending data: %w", err)
+			}
+
+			// Close current file and start new one
+			if err := fb.closeCurrentFile(); err != nil {
+				return err
+			}
+
+			// Keep remaining data for next file
+			fb.pendingData = fb.pendingData[endOfBlock:]
+			
+			// Continue writing remaining data
+			if len(fb.pendingData) > 0 {
+				remaining := fb.pendingData
+				fb.pendingData = nil
+				return fb.write(remaining)
+			}
+			
+			fb.pendingData = nil
+			return nil
+		}
+	}
+
+	// No valid header found yet
+	if len(fb.pendingData) > maxScanSize {
+		fmt.Fprintf(os.Stderr, "Warning: no valid block header found within %d bytes, forcing rotation\n", maxScanSize)
+		return fb.forceRotation()
+	}
+
+	// Wait for more data
+	return nil
+}
+
+func (fb *FileBuffer) forceRotation() error {
+	// Write all pending data and rotate
+	if len(fb.pendingData) > 0 {
+		if _, err := fb.gzipWriter.Write(fb.pendingData); err != nil {
+			return fmt.Errorf("writing pending data on forced rotation: %w", err)
+		}
+	}
+	fb.pendingData = nil
+	return fb.closeCurrentFile()
+}
+
+func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
+	if len(data) < fb.blockFormat.TotalBytes {
+		return 0, false
+	}
+
+	now := time.Now().Unix()
+	offset := 0
+	blockLength := 0
+
+	for i, field := range fb.blockFormat.Fields {
+		var value uint64
+		
+		switch field.Width {
+		case 16:
+			if offset+2 > len(data) {
+				return 0, false
+			}
+			value = uint64(binary.LittleEndian.Uint16(data[offset:]))
+			offset += 2
+		case 32:
+			if offset+4 > len(data) {
+				return 0, false
+			}
+			value = uint64(binary.LittleEndian.Uint32(data[offset:]))
+			offset += 4
+		case 64:
+			if offset+8 > len(data) {
+				return 0, false
+			}
+			value = binary.LittleEndian.Uint64(data[offset:])
+			offset += 8
+		}
+
+		// Validate based on field type
+		switch field.Type {
+		case FieldSec:
+			// Within ±48 hours
+			diff := int64(value) - now
+			if diff < -48*3600 || diff > 48*3600 {
+				return 0, false
+			}
+		case FieldUsec:
+			if value > 999999 {
+				return 0, false
+			}
+		case FieldNsec:
+			if value > 999999999 {
+				return 0, false
+			}
+		case FieldLength:
+			if value > maxBlockSize {
+				return 0, false
+			}
+			blockLength = int(value)
+		case FieldMagic:
+			if value != field.MagicValue {
+				return 0, false
+			}
+		case FieldIgnore:
+			// Any value is okay
+		}
+
+		// Store length if this is the length field
+		if i == fb.blockFormat.LengthIndex && fb.blockFormat.HasLength {
+			blockLength = int(value)
+		}
+	}
+
+	return blockLength, true
 }
 
 func (fb *FileBuffer) openNewFile() error {
