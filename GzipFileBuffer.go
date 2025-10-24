@@ -633,11 +633,11 @@ func (fb *FileBuffer) loadExistingFiles() error {
 
 	// Initialize counter to continue from highest existing counter
 	if len(matchedFiles) > 0 {
-		fb.fileCounter = matchedFiles[len(matchedFiles)-1].counter
+		fb.fileCounter = matchedFiles[len(matchedFiles)-1].counter + 1
 	}
 
 	if len(fb.activeFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "Loaded %d existing file(s), resuming from counter %d\n", 
+		fmt.Fprintf(os.Stderr, "Loaded %d existing file(s), resuming from counter %d\n",
 			len(fb.activeFiles), fb.fileCounter)
 	}
 
