@@ -26,35 +26,38 @@ const (
 	FieldIgnore
 )
 
+// TODO: allow specifying endianness
+// TODO: allow signed vs unsigned
+// TODO: allow 8-bit fields
 type HeaderField struct {
-	Width     int       // 16, 32, 64 bits
-	Type      FieldType
-	MagicValue uint64   // For magic number fields
+	Width      int // 16, 32, 64 bits
+	Type       FieldType
+	MagicValue uint64 // For magic number fields
 }
 
 type BlockHeaderFormat struct {
-	Fields       []HeaderField
-	TotalBytes   int
-	HasLength    bool
-	LengthIndex  int
+	Fields      []HeaderField
+	TotalBytes  int
+	HasLength   bool
+	LengthIndex int
 }
 
 type FileBuffer struct {
-	filePrefix      string
-	maxFileSize     int64
-	maxNumFiles     int
-	timeFormat      string
-	headerBytes     int
-	header          []byte
-	headerCaptured  bool
-	blockFormat     *BlockHeaderFormat
-	maxBlockSize    int
-	pendingData     []byte // Buffer for data while searching for block boundary
-	currentFile     *os.File
-	gzipWriter      *gzip.Writer
-	currentSize     int64
-	fileCounter     int
-	activeFiles     []string
+	filePrefix     string
+	maxFileSize    int64
+	maxNumFiles    int
+	timeFormat     string
+	headerBytes    int
+	header         []byte
+	headerCaptured bool
+	blockFormat    *BlockHeaderFormat
+	maxBlockSize   int
+	pendingData    []byte // Buffer for data while searching for block boundary
+	currentFile    *os.File
+	gzipWriter     *gzip.Writer
+	currentSize    int64
+	fileCounter    int
+	activeFiles    []string
 }
 
 func main() {
@@ -240,7 +243,9 @@ func parseBlockHeaderFormat(format string) (*BlockHeaderFormat, error) {
 func (fb *FileBuffer) run() error {
 	defer fb.closeCurrentFile()
 
-	buf := make([]byte, 32*1024) // 32KB buffer for reading
+	//TODO: make read buffer size configurable
+	buf := make([]byte, 32*1024) //32kB
+
 	for {
 		n, err := os.Stdin.Read(buf)
 		if n > 0 {
@@ -284,7 +289,7 @@ func (fb *FileBuffer) write(data []byte) error {
 			if err := fb.openNewFile(); err != nil {
 				return err
 			}
-			
+
 			// Write header to new file (except for the very first file which already has it)
 			if fb.fileCounter > 1 && len(fb.header) > 0 {
 				if _, err := fb.gzipWriter.Write(fb.header); err != nil {
@@ -293,7 +298,7 @@ func (fb *FileBuffer) write(data []byte) error {
 				fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
 			}
 		}
-		
+
 		// Flush to ensure data is written to file
 		if err := fb.gzipWriter.Flush(); err != nil {
 			return fmt.Errorf("flushing gzip writer: %w", err)
@@ -336,13 +341,13 @@ func (fb *FileBuffer) flushPendingData() error {
 	}
 
 	maxScanSize := fb.maxBlockSize + fb.blockFormat.TotalBytes
-	
+
 	// Search for valid block header
 	for offset := 0; offset <= len(fb.pendingData)-fb.blockFormat.TotalBytes; offset++ {
 		if blockLen, valid := fb.validateBlockHeader(fb.pendingData[offset:]); valid {
 			// Found valid header! Write until end of this block
 			endOfBlock := offset + fb.blockFormat.TotalBytes + blockLen
-			
+
 			if endOfBlock > len(fb.pendingData) {
 				// Need more data to complete this block
 				if len(fb.pendingData) > maxScanSize {
@@ -366,14 +371,14 @@ func (fb *FileBuffer) flushPendingData() error {
 
 			// Keep remaining data for next file
 			fb.pendingData = fb.pendingData[endOfBlock:]
-			
+
 			// Continue writing remaining data
 			if len(fb.pendingData) > 0 {
 				remaining := fb.pendingData
 				fb.pendingData = nil
 				return fb.write(remaining)
 			}
-			
+
 			fb.pendingData = nil
 			return nil
 		}
@@ -411,7 +416,7 @@ func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
 
 	for i, field := range fb.blockFormat.Fields {
 		var value uint64
-		
+
 		switch field.Width {
 		case 16:
 			if offset+2 > len(data) {
@@ -524,12 +529,14 @@ func (fb *FileBuffer) closeCurrentFile() error {
 }
 
 func (fb *FileBuffer) generateFilename() string {
+
+	//TODO: option for local time vs UTC
 	timestamp := time.Now().UTC().Format(fb.timeFormat)
-	
+
 	// Split prefix into name and extension
 	ext := filepath.Ext(fb.filePrefix)
 	nameWithoutExt := strings.TrimSuffix(fb.filePrefix, ext)
-	
+
 	// Create filename with zero-padded counter
 	// Using 6 digits for counter to support large rotations
 	if ext != "" {
@@ -544,7 +551,7 @@ func (fb *FileBuffer) loadExistingFiles() error {
 	ext := filepath.Ext(fb.filePrefix)
 	nameWithoutExt := strings.TrimSuffix(fb.filePrefix, ext)
 	escapedName := regexp.QuoteMeta(nameWithoutExt)
-	
+
 	var pattern string
 	if ext != "" {
 		escapedExt := regexp.QuoteMeta(ext)
@@ -552,7 +559,7 @@ func (fb *FileBuffer) loadExistingFiles() error {
 	} else {
 		pattern = fmt.Sprintf(`^%s_(\d{6})_.*\.gz$`, escapedName)
 	}
-	
+
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return fmt.Errorf("compiling regex pattern: %w", err)
@@ -585,7 +592,7 @@ func (fb *FileBuffer) loadExistingFiles() error {
 		if entry.IsDir() {
 			continue
 		}
-		
+
 		filename := entry.Name()
 		if !re.MatchString(filename) {
 			continue
