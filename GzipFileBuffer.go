@@ -270,10 +270,16 @@ func (fb *FileBuffer) write(data []byte) error {
 		bytesToCapture := fb.headerBytes
 		if bytesToCapture > len(data) {
 			bytesToCapture = len(data)
+			fb.headerBytes -= bytesToCapture
+		} else {
+			fb.headerCaptured = true
 		}
-		fb.header = make([]byte, bytesToCapture)
-		copy(fb.header, data[:bytesToCapture])
-		fb.headerCaptured = true
+
+		if fb.header == nil {
+			fb.header = make([]byte, 0, fb.headerBytes)
+		}
+		fb.header = append(fb.header, data[:bytesToCapture]...)
+
 		fmt.Fprintf(os.Stderr, "Captured %d header bytes from stream\n", bytesToCapture)
 	}
 
