@@ -356,11 +356,6 @@ func (fb *FileBuffer) flushPendingData() error {
 
 			if endOfBlock > len(fb.pendingData) {
 				// Need more data to complete this block
-				if len(fb.pendingData) > maxScanSize {
-					// Scanned too far without finding complete block
-					fmt.Fprintf(os.Stderr, "Warning: no complete block found within %d bytes, forcing rotation\n", maxScanSize)
-					return fb.forceRotation()
-				}
 				// Wait for more data
 				return nil
 			}
