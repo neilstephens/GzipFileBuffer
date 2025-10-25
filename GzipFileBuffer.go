@@ -33,9 +33,8 @@ const (
 	BigEndian
 )
 
-// TODO: allow 8-bit fields
 type HeaderField struct {
-	Width      int // 16, 32, 64 bits
+	Width      int // 8, 16, 32, 64 bits
 	Type       FieldType
 	MagicValue uint64 // For magic number fields
 	Signed     bool   // For signed vs unsigned interpretation
@@ -111,7 +110,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  (e.g., video containers, serialization formats). Set to 0 to disable.\n\n")
 		fmt.Fprintf(os.Stderr, "Block Header Format:\n")
 		fmt.Fprintf(os.Stderr, "  Specifies block/packet boundary detection to avoid splitting mid-block.\n")
-		fmt.Fprintf(os.Stderr, "  Format: <uN:type> or <sN:type> where N is bit width (16, 32, 64)\n")
+		fmt.Fprintf(os.Stderr, "  Format: <uN:type> or <sN:type> where N is bit width (8, 16, 32, 64)\n")
 		fmt.Fprintf(os.Stderr, "  Use 'u' for unsigned, 's' for signed. Types:\n")
 		fmt.Fprintf(os.Stderr, "    sec     - Unix timestamp seconds (validated within ±48 hours)\n")
 		fmt.Fprintf(os.Stderr, "    usec    - Microseconds (0-999999)\n")
@@ -120,7 +119,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "    0xHEX   - Magic number (exact match required)\n")
 		fmt.Fprintf(os.Stderr, "    (none)  - Any value (ignored)\n")
 		fmt.Fprintf(os.Stderr, "  Example for pcap: <u32:sec><u32:usec><u32:length><u32>\n")
-		fmt.Fprintf(os.Stderr, "  Endianness controlled by --endianness flag (default: little).\n\n")
+		fmt.Fprintf(os.Stderr, "  Example with 8-bit: <u8:0xAA><u8:0xBB><u16:length><u32>\n")
+		fmt.Fprintf(os.Stderr, "  Endianness controlled by --endianness flag (default: little).\n")
+		fmt.Fprintf(os.Stderr, "  Note: Endianness does not apply to 8-bit fields.\n\n")
 		fmt.Fprintf(os.Stderr, "Compression Level:\n")
 		fmt.Fprintf(os.Stderr, "  -1: Default compression (balanced)\n")
 		fmt.Fprintf(os.Stderr, "   0: No compression (fastest, largest files)\n")
@@ -236,7 +237,7 @@ func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderF
 		Endianness: endianness,
 	}
 
-	// Parse format like <u32:sec><u32:usec><u32:length><u32> or <s16:value>
+	// Parse format like <u32:sec><u32:usec><u32:length><u32> or <s16:value> or <u8:0xFF>
 	re := regexp.MustCompile(`<([us])(\d+)(?::([^>]+))?>`)
 	matches := re.FindAllStringSubmatch(format, -1)
 
@@ -247,8 +248,8 @@ func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderF
 	for i, match := range matches {
 		signedness := match[1]
 		width, err := strconv.Atoi(match[2])
-		if err != nil || (width != 16 && width != 32 && width != 64) {
-			return nil, fmt.Errorf("invalid bit width: %s (must be 16, 32, or 64)", match[2])
+		if err != nil || (width != 8 && width != 16 && width != 32 && width != 64) {
+			return nil, fmt.Errorf("invalid bit width: %s (must be 8, 16, 32, or 64)", match[2])
 		}
 
 		field := HeaderField{
@@ -469,6 +470,12 @@ func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
 		var value uint64
 
 		switch field.Width {
+		case 8:
+			if offset+1 > len(data) {
+				return 0, false
+			}
+			value = uint64(data[offset])
+			offset += 1
 		case 16:
 			if offset+2 > len(data) {
 				return 0, false
