@@ -163,69 +163,6 @@ func processor(dataChannel <-chan []byte, fb *FileBuffer, wg *sync.WaitGroup) {
 	}
 }
 
-func parseBlockHeaderFormat(format string, endianness Endianness) *BlockHeaderFormat {
-	result := &BlockHeaderFormat{
-		Fields:     make([]HeaderField, 0),
-		Endianness: endianness,
-	}
-
-	// Parse format like <u32:sec><u32:usec><u32:length><u32> or <s16:value> or <u8:0xFF>
-	re := regexp.MustCompile(`<([us])(\d+)(?::([^>]+))?>`)
-	matches := re.FindAllStringSubmatch(format, -1)
-
-	if len(matches) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: Invalid block header format: %s\n", format)
-		os.Exit(1)
-	}
-
-	for i, match := range matches {
-		signedness := match[1]
-		width, err := strconv.Atoi(match[2])
-		if err != nil || (width != 8 && width != 16 && width != 32 && width != 64) {
-			fmt.Fprintf(os.Stderr, "Error: Invalid field width: %s\n", match[2])
-			os.Exit(1)
-		}
-
-		field := HeaderField{
-			Width:  width,
-			Type:   FieldIgnore,
-			Signed: signedness == "s",
-		}
-
-		if len(match) > 3 && match[3] != "" {
-			typeStr := match[3]
-			switch {
-			case typeStr == "sec":
-				field.Type = FieldSec
-			case typeStr == "usec":
-				field.Type = FieldUsec
-			case typeStr == "nsec":
-				field.Type = FieldNsec
-			case typeStr == "length":
-				field.Type = FieldLength
-				result.HasLength = true
-				result.LengthIndex = i
-			case strings.HasPrefix(typeStr, "0x"):
-				field.Type = FieldMagic
-				val, err := strconv.ParseUint(typeStr[2:], 16, 64)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: Invalid magic number: %s\n", typeStr)
-					os.Exit(1)
-				}
-				field.MagicValue = val
-			default:
-				fmt.Fprintf(os.Stderr, "Error: Unknown field type: %s\n", typeStr)
-				os.Exit(1)
-			}
-		}
-
-		result.Fields = append(result.Fields, field)
-		result.TotalBytes += width / 8
-	}
-
-	return result
-}
-
 func (fb *FileBuffer) write(data []byte) {
 	// Capture header from first data if needed
 	if !fb.headerCaptured && fb.headerBytes > 0 {
