@@ -50,23 +50,23 @@ type BlockHeaderFormat struct {
 }
 
 type FileBuffer struct {
-	filePrefix     string
-	maxFileSize    int64
-	maxNumFiles    int
-	timeFormat     string
-	useLocalTime   bool
-	headerBytes    int
-	header         []byte
-	headerCaptured bool
-	blockFormat    *BlockHeaderFormat
-	maxBlockSize   int
-	readBufferSize int
-	pendingData    []byte
-	currentFile    *os.File
-	gzipWriter     *gzip.Writer
-	currentSize    int64
-	fileCounter    int
-	activeFiles    []string
+	filePrefix       string
+	maxFileSize      int64
+	maxNumFiles      int
+	timeFormat       string
+	useLocalTime     bool
+	headerBytes      int
+	header           []byte
+	headerCaptured   bool
+	blockFormat      *BlockHeaderFormat
+	maxBlockSize     int
+	readBufferSize   int
+	compressionLevel int
+	pendingData      []byte
+	currentFile      *os.File
+	gzipWriter       *gzip.Writer
+	fileCounter      int
+	activeFiles      []string
 }
 
 func main() {
@@ -79,6 +79,7 @@ func main() {
 	blockHeader := flag.String("block_header", "", "Block header format for boundary detection (e.g., <u32:sec><u32:usec><u32:length><u32>)")
 	maxBlockSize := flag.Int("max_block_size", 262144, "Maximum block size in bytes when scanning for boundaries (default: 262144 / 256KB)")
 	readBufferSize := flag.Int("read_buffer_size", 32768, "Read buffer size in bytes (default: 32768 / 32KB)")
+	compressionLevel := flag.Int("compression_level", gzip.DefaultCompression, "Gzip compression level: -1 (default), 0 (none), 1 (best speed) to 9 (best compression)")
 	endianness := flag.String("endianness", "little", "Byte order for multi-byte fields: 'little' or 'big' (default: little)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
 
@@ -97,7 +98,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cat data.bin | %s --file_size 10240 --num_files 5 --file_prefix output\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  cat logs.txt | %s --file_size 51200 --num_files 10 --file_prefix logs.txt\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  cat stream | %s --file_size 1024 --num_files 3 --file_prefix data --time_format 20060102-150405\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  cat video.mp4 | %s --file_size 102400 --num_files 5 --file_prefix video.mp4 --header_bytes 1024\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  cat video.mp4 | %s --file_size 102400 --num_files 5 --file_prefix video.mp4 --header_bytes 1024 --compression_level 1\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  tcpdump -w - | %s --file_size 102400 --num_files 10 --file_prefix capture.pcap --block_header '<u32:sec><u32:usec><u32:length><u32>'\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Time Format:\n")
 		fmt.Fprintf(os.Stderr, "  Uses Go time layout format. Default is ISO 8601: 2006-01-02T15:04:05.000Z\n")
@@ -120,6 +121,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "    (none)  - Any value (ignored)\n")
 		fmt.Fprintf(os.Stderr, "  Example for pcap: <u32:sec><u32:usec><u32:length><u32>\n")
 		fmt.Fprintf(os.Stderr, "  Endianness controlled by --endianness flag (default: little).\n\n")
+		fmt.Fprintf(os.Stderr, "Compression Level:\n")
+		fmt.Fprintf(os.Stderr, "  -1: Default compression (balanced)\n")
+		fmt.Fprintf(os.Stderr, "   0: No compression (fastest, largest files)\n")
+		fmt.Fprintf(os.Stderr, "   1: Best speed (fast, larger files)\n")
+		fmt.Fprintf(os.Stderr, "   9: Best compression (slow, smallest files)\n\n")
 	}
 
 	flag.Parse()
@@ -164,6 +170,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: --read_buffer_size must be positive")
 		os.Exit(1)
 	}
+	if *compressionLevel < -1 || *compressionLevel > 9 {
+		fmt.Fprintln(os.Stderr, "Error: --compression_level must be between -1 and 9")
+		os.Exit(1)
+	}
 
 	// Validate endianness
 	var byteOrder Endianness
@@ -178,16 +188,17 @@ func main() {
 	}
 
 	fb := &FileBuffer{
-		filePrefix:     *filePrefix,
-		maxFileSize:    *fileSizeKB * 1024, // Convert KB to bytes
-		maxNumFiles:    *numFiles,
-		timeFormat:     *timeFormat,
-		useLocalTime:   *useLocalTime,
-		headerBytes:    *headerBytes,
-		maxBlockSize:   *maxBlockSize,
-		readBufferSize: *readBufferSize,
-		activeFiles:    make([]string, 0, *numFiles),
-		pendingData:    make([]byte, 0),
+		filePrefix:       *filePrefix,
+		maxFileSize:      *fileSizeKB * 1024, // Convert KB to bytes
+		maxNumFiles:      *numFiles,
+		timeFormat:       *timeFormat,
+		useLocalTime:     *useLocalTime,
+		headerBytes:      *headerBytes,
+		maxBlockSize:     *maxBlockSize,
+		readBufferSize:   *readBufferSize,
+		compressionLevel: *compressionLevel,
+		activeFiles:      make([]string, 0, *numFiles),
+		pendingData:      make([]byte, 0),
 	}
 
 	// Parse block header format if provided
@@ -547,14 +558,18 @@ func (fb *FileBuffer) openNewFile() error {
 		return fmt.Errorf("creating file %s: %w", filename, err)
 	}
 
-	// Store file handle and create NEW gzip writer for this file
+	// Store file handle and create NEW gzip writer for this file with specified compression level
 	fb.currentFile = f
-	fb.gzipWriter = gzip.NewWriter(f) // Creates a fresh gzip writer with new header
-	fb.currentSize = 0
+	gzWriter, err := gzip.NewWriterLevel(f, fb.compressionLevel)
+	if err != nil {
+		f.Close()
+		return fmt.Errorf("creating gzip writer: %w", err)
+	}
+	fb.gzipWriter = gzWriter
 	fb.fileCounter++
 	fb.activeFiles = append(fb.activeFiles, filename)
 
-	fmt.Fprintf(os.Stderr, "Created new file: %s (counter: %d)\n", filename, fb.fileCounter)
+	fmt.Fprintf(os.Stderr, "Created new file: %s (counter: %d, compression: %d)\n", filename, fb.fileCounter, fb.compressionLevel)
 
 	return nil
 }
