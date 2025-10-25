@@ -327,6 +327,8 @@ func (fb *FileBuffer) write(data []byte) error {
 				if err := fb.closeCurrentFile(); err != nil {
 					return err
 				}
+				// Continue to write remaining data in next iteration
+				continue
 			}
 		}
 
