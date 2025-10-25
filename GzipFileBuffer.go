@@ -327,7 +327,7 @@ func (fb *FileBuffer) write(data []byte) error {
 	}
 
 	for len(data) > 0 {
-		// Open new file if needed (both file and gzip writer must be nil)
+		// Open new file if needed
 		if fb.currentFile == nil || fb.gzipWriter == nil {
 			if err := fb.openNewFile(); err != nil {
 				return err
@@ -560,23 +560,29 @@ func (fb *FileBuffer) openNewFile() error {
 }
 
 func (fb *FileBuffer) closeCurrentFile() error {
-	if fb.gzipWriter == nil {
+	if fb.gzipWriter == nil && fb.currentFile == nil {
 		return nil
 	}
 
 	// Close gzip writer first to flush compressed data
-	if err := fb.gzipWriter.Close(); err != nil {
-		fb.currentFile.Close()
-		return fmt.Errorf("closing gzip writer: %w", err)
+	if fb.gzipWriter != nil {
+		if err := fb.gzipWriter.Close(); err != nil {
+			if fb.currentFile != nil {
+				fb.currentFile.Close()
+			}
+			return fmt.Errorf("closing gzip writer: %w", err)
+		}
+		fb.gzipWriter = nil
 	}
 
 	// Close the file
-	if err := fb.currentFile.Close(); err != nil {
-		return fmt.Errorf("closing file: %w", err)
+	if fb.currentFile != nil {
+		if err := fb.currentFile.Close(); err != nil {
+			return fmt.Errorf("closing file: %w", err)
+		}
+		fb.currentFile = nil
 	}
 
-	fb.gzipWriter = nil
-	fb.currentFile = nil
 	return nil
 }
 
