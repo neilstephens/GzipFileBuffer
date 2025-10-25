@@ -2,7 +2,6 @@ package main
 
 import (
 	"compress/gzip"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,39 +11,6 @@ import (
 	"strings"
 	"time"
 )
-
-type FieldType int
-
-const (
-	FieldSec FieldType = iota
-	FieldUsec
-	FieldNsec
-	FieldLength
-	FieldMagic
-	FieldIgnore
-)
-
-type Endianness int
-
-const (
-	LittleEndian Endianness = iota
-	BigEndian
-)
-
-type HeaderField struct {
-	Width      int // 8, 16, 32, 64 bits
-	Type       FieldType
-	MagicValue uint64 // For magic number fields
-	Signed     bool   // For signed vs unsigned interpretation
-}
-
-type BlockHeaderFormat struct {
-	Fields      []HeaderField
-	TotalBytes  int
-	HasLength   bool
-	LengthIndex int
-	Endianness  Endianness
-}
 
 type FileBuffer struct {
 	filePrefix       string
@@ -120,105 +86,6 @@ func (fb *FileBuffer) write(data []byte) {
 	if n != len(data) {
 		fmt.Fprintf(os.Stderr, "Error: short write to gzip: wrote %d bytes, expected %d bytes", n, len(data))
 	}
-}
-
-func (fb *FileBuffer) findBlockHeader(data []byte) int {
-	if fb.blockFormat == nil {
-		fmt.Fprintf(os.Stderr, "Internal error: findBlockHeader called without block format")
-		return len(data)
-	}
-
-	// Search for valid block header
-	for offset := 0; offset <= len(data)-fb.blockFormat.TotalBytes; offset++ {
-		if valid := fb.validateBlockHeader(data[offset:]); valid {
-			return offset
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "Warning: no valid block header found (to split on) in read buffer. Try a bigger buffer?\n")
-	return len(data)
-}
-
-func (fb *FileBuffer) validateBlockHeader(data []byte) bool {
-	if len(data) < fb.blockFormat.TotalBytes {
-		return false
-	}
-
-	now := time.Now().Unix()
-	offset := 0
-
-	for _, field := range fb.blockFormat.Fields {
-		var value uint64
-
-		switch field.Width {
-		case 8:
-			if offset+1 > len(data) {
-				return false
-			}
-			value = uint64(data[offset])
-			offset += 1
-		case 16:
-			if offset+2 > len(data) {
-				return false
-			}
-			if fb.blockFormat.Endianness == LittleEndian {
-				value = uint64(binary.LittleEndian.Uint16(data[offset:]))
-			} else {
-				value = uint64(binary.BigEndian.Uint16(data[offset:]))
-			}
-			offset += 2
-		case 32:
-			if offset+4 > len(data) {
-				return false
-			}
-			if fb.blockFormat.Endianness == LittleEndian {
-				value = uint64(binary.LittleEndian.Uint32(data[offset:]))
-			} else {
-				value = uint64(binary.BigEndian.Uint32(data[offset:]))
-			}
-			offset += 4
-		case 64:
-			if offset+8 > len(data) {
-				return false
-			}
-			if fb.blockFormat.Endianness == LittleEndian {
-				value = binary.LittleEndian.Uint64(data[offset:])
-			} else {
-				value = binary.BigEndian.Uint64(data[offset:])
-			}
-			offset += 8
-		}
-
-		// Validate based on field type
-		switch field.Type {
-		case FieldSec:
-			// Within ±48 hours
-			diff := int64(value) - now
-			if diff < -48*3600 || diff > 48*3600 {
-				return false
-			}
-		case FieldUsec:
-			if value > 999999 {
-				return false
-			}
-		case FieldNsec:
-			if value > 999999999 {
-				return false
-			}
-		case FieldLength:
-			if value > uint64(fb.maxBlockSize) {
-				return false
-			}
-		case FieldMagic:
-			if value != field.MagicValue {
-				return false
-			}
-		case FieldIgnore:
-			// Any value is okay
-		}
-	}
-
-	return true
 }
 
 func (fb *FileBuffer) openNewFile() {
@@ -312,7 +179,6 @@ func (fb *FileBuffer) generateFilename() string {
 	return fmt.Sprintf("%s_%06d_%s.gz", fb.filePrefix, fb.fileCounter, timestamp)
 }
 
-// Load existing files matching the pattern and initialize counter
 func (fb *FileBuffer) loadExistingFiles() {
 	// Build regex pattern for matching files
 	ext := filepath.Ext(fb.filePrefix)
