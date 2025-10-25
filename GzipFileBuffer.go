@@ -313,7 +313,7 @@ func (fb *FileBuffer) write(data []byte) error {
 		}
 
 		if fb.header == nil {
-			fb.header = make([]byte, 0, fb.headerBytes)
+			fb.header = make([]byte, 0, fb.headerBytes+bytesToCapture)
 		}
 		fb.header = append(fb.header, data[:bytesToCapture]...)
 
