@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -230,10 +232,27 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
+	// Setup signal handler for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		fmt.Fprintf(os.Stderr, "Main: Received signal: %v. Initiating graceful shutdown...\n", sig)
+		fmt.Fprintf(os.Stderr, "Main: Press Ctrl+C again to force exit (will lose unprocessed data).\n")
+		os.Stdin.Close()
+		<-sigChan
+		fmt.Fprintf(os.Stderr, "Main: Received second signal. Forcing exit.\n")
+		os.Exit(1)
+	}()
+	defer signal.Stop(sigChan)
+
+	// Let's go!
+	fb.openNewFile()
 	go processor(dataChannel, fb, &wg)
 	go reader(dataChannel, *readBufferSize)
-
 	wg.Wait()
+	fb.closeCurrentFile()
+	fmt.Fprintf(os.Stderr, "Main: Shutdown cleanly.\n")
 }
 
 // "producer" goroutine.
