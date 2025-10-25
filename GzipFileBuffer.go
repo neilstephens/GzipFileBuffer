@@ -26,13 +26,19 @@ const (
 	FieldIgnore
 )
 
-// TODO: allow specifying endianness
-// TODO: allow signed vs unsigned
+type Endianness int
+
+const (
+	LittleEndian Endianness = iota
+	BigEndian
+)
+
 // TODO: allow 8-bit fields
 type HeaderField struct {
 	Width      int // 16, 32, 64 bits
 	Type       FieldType
 	MagicValue uint64 // For magic number fields
+	Signed     bool   // For signed vs unsigned interpretation
 }
 
 type BlockHeaderFormat struct {
@@ -40,6 +46,7 @@ type BlockHeaderFormat struct {
 	TotalBytes  int
 	HasLength   bool
 	LengthIndex int
+	Endianness  Endianness
 }
 
 type FileBuffer struct {
@@ -68,6 +75,7 @@ func main() {
 	headerBytes := flag.Int("header_bytes", 0, "Number of bytes from start of stream to copy as header for each file (default: 0)")
 	blockHeader := flag.String("block_header", "", "Block header format for boundary detection (e.g., <u32:sec><u32:usec><u32:length><u32>)")
 	maxBlockSize := flag.Int("max_block_size", 262144, "Maximum block size in bytes when scanning for boundaries (default: 262144 / 256KB)")
+	endianness := flag.String("endianness", "little", "Byte order for multi-byte fields: 'little' or 'big' (default: little)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
 
 	flag.Usage = func() {
@@ -98,7 +106,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  (e.g., video containers, serialization formats). Set to 0 to disable.\n\n")
 		fmt.Fprintf(os.Stderr, "Block Header Format:\n")
 		fmt.Fprintf(os.Stderr, "  Specifies block/packet boundary detection to avoid splitting mid-block.\n")
-		fmt.Fprintf(os.Stderr, "  Format: <uN:type> where N is bit width (16, 32, 64) and type is:\n")
+		fmt.Fprintf(os.Stderr, "  Format: <uN:type> or <sN:type> where N is bit width (16, 32, 64)\n")
+		fmt.Fprintf(os.Stderr, "  Use 'u' for unsigned, 's' for signed. Types:\n")
 		fmt.Fprintf(os.Stderr, "    sec     - Unix timestamp seconds (validated within ±48 hours)\n")
 		fmt.Fprintf(os.Stderr, "    usec    - Microseconds (0-999999)\n")
 		fmt.Fprintf(os.Stderr, "    nsec    - Nanoseconds (0-999999999)\n")
@@ -106,7 +115,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "    0xHEX   - Magic number (exact match required)\n")
 		fmt.Fprintf(os.Stderr, "    (none)  - Any value (ignored)\n")
 		fmt.Fprintf(os.Stderr, "  Example for pcap: <u32:sec><u32:usec><u32:length><u32>\n")
-		fmt.Fprintf(os.Stderr, "  All multi-byte values are assumed little-endian.\n\n")
+		fmt.Fprintf(os.Stderr, "  Endianness controlled by --endianness flag (default: little).\n\n")
 	}
 
 	flag.Parse()
@@ -148,6 +157,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate endianness
+	var byteOrder Endianness
+	switch strings.ToLower(*endianness) {
+	case "little":
+		byteOrder = LittleEndian
+	case "big":
+		byteOrder = BigEndian
+	default:
+		fmt.Fprintf(os.Stderr, "Error: --endianness must be 'little' or 'big', got: %s\n", *endianness)
+		os.Exit(1)
+	}
+
 	fb := &FileBuffer{
 		filePrefix:   *filePrefix,
 		maxFileSize:  *fileSizeKB * 1024, // Convert KB to bytes
@@ -161,13 +182,17 @@ func main() {
 
 	// Parse block header format if provided
 	if *blockHeader != "" {
-		format, err := parseBlockHeaderFormat(*blockHeader)
+		format, err := parseBlockHeaderFormat(*blockHeader, byteOrder)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error parsing block header format: %v\n", err)
 			os.Exit(1)
 		}
 		fb.blockFormat = format
-		fmt.Fprintf(os.Stderr, "Block header format: %d bytes, %d fields\n", format.TotalBytes, len(format.Fields))
+		endianStr := "little-endian"
+		if byteOrder == BigEndian {
+			endianStr = "big-endian"
+		}
+		fmt.Fprintf(os.Stderr, "Block header format: %d bytes, %d fields (%s)\n", format.TotalBytes, len(format.Fields), endianStr)
 	}
 
 	// Resume from existing files if requested
@@ -184,13 +209,14 @@ func main() {
 	}
 }
 
-func parseBlockHeaderFormat(format string) (*BlockHeaderFormat, error) {
+func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderFormat, error) {
 	result := &BlockHeaderFormat{
-		Fields: make([]HeaderField, 0),
+		Fields:     make([]HeaderField, 0),
+		Endianness: endianness,
 	}
 
-	// Parse format like <u32:sec><u32:usec><u32:length><u32>
-	re := regexp.MustCompile(`<u(\d+)(?::([^>]+))?>`)
+	// Parse format like <u32:sec><u32:usec><u32:length><u32> or <s16:value>
+	re := regexp.MustCompile(`<([us])(\d+)(?::([^>]+))?>`)
 	matches := re.FindAllStringSubmatch(format, -1)
 
 	if len(matches) == 0 {
@@ -198,18 +224,20 @@ func parseBlockHeaderFormat(format string) (*BlockHeaderFormat, error) {
 	}
 
 	for i, match := range matches {
-		width, err := strconv.Atoi(match[1])
+		signedness := match[1]
+		width, err := strconv.Atoi(match[2])
 		if err != nil || (width != 16 && width != 32 && width != 64) {
-			return nil, fmt.Errorf("invalid bit width: %s (must be 16, 32, or 64)", match[1])
+			return nil, fmt.Errorf("invalid bit width: %s (must be 16, 32, or 64)", match[2])
 		}
 
 		field := HeaderField{
-			Width: width,
-			Type:  FieldIgnore,
+			Width:  width,
+			Type:   FieldIgnore,
+			Signed: signedness == "s",
 		}
 
-		if len(match) > 2 && match[2] != "" {
-			typeStr := match[2]
+		if len(match) > 3 && match[3] != "" {
+			typeStr := match[3]
 			switch {
 			case typeStr == "sec":
 				field.Type = FieldSec
@@ -425,19 +453,31 @@ func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
 			if offset+2 > len(data) {
 				return 0, false
 			}
-			value = uint64(binary.LittleEndian.Uint16(data[offset:]))
+			if fb.blockFormat.Endianness == LittleEndian {
+				value = uint64(binary.LittleEndian.Uint16(data[offset:]))
+			} else {
+				value = uint64(binary.BigEndian.Uint16(data[offset:]))
+			}
 			offset += 2
 		case 32:
 			if offset+4 > len(data) {
 				return 0, false
 			}
-			value = uint64(binary.LittleEndian.Uint32(data[offset:]))
+			if fb.blockFormat.Endianness == LittleEndian {
+				value = uint64(binary.LittleEndian.Uint32(data[offset:]))
+			} else {
+				value = uint64(binary.BigEndian.Uint32(data[offset:]))
+			}
 			offset += 4
 		case 64:
 			if offset+8 > len(data) {
 				return 0, false
 			}
-			value = binary.LittleEndian.Uint64(data[offset:])
+			if fb.blockFormat.Endianness == LittleEndian {
+				value = binary.LittleEndian.Uint64(data[offset:])
+			} else {
+				value = binary.BigEndian.Uint64(data[offset:])
+			}
 			offset += 8
 		}
 
