@@ -64,7 +64,6 @@ type FileBuffer struct {
 	maxBlockSize     int
 	readBufferSize   int
 	compressionLevel int
-	pendingData      []byte
 	currentFile      *os.File
 	gzipWriter       *gzip.Writer
 	fileCounter      int
@@ -80,7 +79,7 @@ func main() {
 	headerBytes := flag.Int("header_bytes", 0, "Number of bytes from start of stream to copy as header for each file (default: 0)")
 	blockHeader := flag.String("block_header", "", "Block header format for boundary detection (e.g., <u32:sec><u32:usec><u32:length><u32>)")
 	maxBlockSize := flag.Int("max_block_size", 262144, "Maximum block size in bytes when scanning for boundaries (default: 262144 / 256KB)")
-	readBufferSize := flag.Int("read_buffer_size", 32768, "Read buffer size in bytes (default: 32768 / 32KB)")
+	readBufferSize := flag.Int("read_buffer_size", 262144, "Read buffer size in bytes (default: 262144 / 256KB)")
 	compressionLevel := flag.Int("compression_level", gzip.DefaultCompression, "Gzip compression level: -1 (default), 0 (none), 1 (best speed) to 9 (best compression)")
 	endianness := flag.String("endianness", "little", "Byte order for multi-byte fields: 'little' or 'big' (default: little)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
@@ -191,6 +190,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate header size vs read buffer size
+	if *headerBytes > *readBufferSize {
+		fmt.Fprintln(os.Stderr, "Error: --read_buffer_size must be at least as large as --header_bytes")
+		os.Exit(1)
+	}
+
+	// Validate max block size vs read buffer size
+	if *maxBlockSize > *readBufferSize {
+		fmt.Fprintln(os.Stderr, "Error: --read_buffer_size must be at least as large as --max_block_size")
+		os.Exit(1)
+	}
+
 	fb := &FileBuffer{
 		filePrefix:       *filePrefix,
 		maxFileSize:      *fileSizeKB * 1024, // Convert KB to bytes
@@ -202,30 +213,21 @@ func main() {
 		readBufferSize:   *readBufferSize,
 		compressionLevel: *compressionLevel,
 		activeFiles:      make([]string, 0, *numFiles),
-		pendingData:      make([]byte, 0),
 	}
 
 	// Parse block header format if provided
 	if *blockHeader != "" {
-		format, err := parseBlockHeaderFormat(*blockHeader, byteOrder)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing block header format: %v\n", err)
-			os.Exit(1)
-		}
-		fb.blockFormat = format
+		fb.blockFormat = parseBlockHeaderFormat(*blockHeader, byteOrder)
 		endianStr := "little-endian"
 		if byteOrder == BigEndian {
 			endianStr = "big-endian"
 		}
-		fmt.Fprintf(os.Stderr, "Block header format: %d bytes, %d fields (%s)\n", format.TotalBytes, len(format.Fields), endianStr)
+		fmt.Fprintf(os.Stderr, "Block header format: %d bytes, %d fields (%s)\n", fb.blockFormat.TotalBytes, len(fb.blockFormat.Fields), endianStr)
 	}
 
 	// Resume from existing files if requested
 	if *resumeExisting {
-		if err := fb.loadExistingFiles(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading existing files: %v\n", err)
-			os.Exit(1)
-		}
+		fb.loadExistingFiles()
 	}
 
 	dataChannel := make(chan []byte, 100) //allow up to 100 reads per processor iteration
@@ -308,11 +310,12 @@ func processor(dataChannel <-chan []byte, fb *FileBuffer, wg *sync.WaitGroup) {
 
 	// After the channel is closed, there might be some data left
 	if len(processingBuffer) > 0 {
+		fmt.Fprintf(os.Stderr, "Processing final %d bytes of data\n", len(processingBuffer))
 		fb.write(processingBuffer)
 	}
 }
 
-func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderFormat, error) {
+func parseBlockHeaderFormat(format string, endianness Endianness) *BlockHeaderFormat {
 	result := &BlockHeaderFormat{
 		Fields:     make([]HeaderField, 0),
 		Endianness: endianness,
@@ -323,14 +326,16 @@ func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderF
 	matches := re.FindAllStringSubmatch(format, -1)
 
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("no valid field specifications found")
+		fmt.Fprintf(os.Stderr, "Error: Invalid block header format: %s\n", format)
+		os.Exit(1)
 	}
 
 	for i, match := range matches {
 		signedness := match[1]
 		width, err := strconv.Atoi(match[2])
 		if err != nil || (width != 8 && width != 16 && width != 32 && width != 64) {
-			return nil, fmt.Errorf("invalid bit width: %s (must be 8, 16, 32, or 64)", match[2])
+			fmt.Fprintf(os.Stderr, "Error: Invalid field width: %s\n", match[2])
+			os.Exit(1)
 		}
 
 		field := HeaderField{
@@ -356,11 +361,13 @@ func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderF
 				field.Type = FieldMagic
 				val, err := strconv.ParseUint(typeStr[2:], 16, 64)
 				if err != nil {
-					return nil, fmt.Errorf("invalid hex value: %s", typeStr)
+					fmt.Fprintf(os.Stderr, "Error: Invalid magic number: %s\n", typeStr)
+					os.Exit(1)
 				}
 				field.MagicValue = val
 			default:
-				return nil, fmt.Errorf("unknown field type: %s", typeStr)
+				fmt.Fprintf(os.Stderr, "Error: Unknown field type: %s\n", typeStr)
+				os.Exit(1)
 			}
 		}
 
@@ -368,175 +375,103 @@ func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderF
 		result.TotalBytes += width / 8
 	}
 
-	return result, nil
+	return result
 }
 
-func (fb *FileBuffer) write(data []byte) error {
+func (fb *FileBuffer) write(data []byte) {
 	// Capture header from first data if needed
 	if !fb.headerCaptured && fb.headerBytes > 0 {
 		bytesToCapture := fb.headerBytes
-		if bytesToCapture > len(data) {
+		if len(data) < fb.headerBytes {
+			fmt.Fprintf(os.Stderr, "Insufficient data to capture header: need %d bytes, got %d bytes", fb.headerBytes, len(data))
 			bytesToCapture = len(data)
-			fb.headerBytes -= bytesToCapture
-		} else {
-			fb.headerCaptured = true
 		}
 
-		if fb.header == nil {
-			fb.header = make([]byte, 0, fb.headerBytes+bytesToCapture)
-		}
-		fb.header = append(fb.header, data[:bytesToCapture]...)
+		fb.header = make([]byte, bytesToCapture)
+		copy(fb.header, data[:bytesToCapture])
+		fb.headerCaptured = true
 
-		fmt.Fprintf(os.Stderr, "Captured %d header bytes from stream\n", bytesToCapture)
+		fmt.Fprintf(os.Stderr, "Captured %d header bytes from stream\n", fb.headerBytes)
 	}
 
-	// Add data to pending buffer if we're searching for block boundary
-	if len(fb.pendingData) > 0 {
-		fb.pendingData = append(fb.pendingData, data...)
-		return fb.flushPendingData()
+	// Flush to ensure data is written to file
+	if err := fb.gzipWriter.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "Flushing gzip writer: %w", err)
 	}
 
-	for len(data) > 0 {
-		// Open new file if needed
-		if fb.currentFile == nil || fb.gzipWriter == nil {
-			if err := fb.openNewFile(); err != nil {
-				return err
-			}
+	// Check actual file size on disk
+	fileInfo, err := fb.currentFile.Stat()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Getting file stats: %w", err)
+	}
 
-			// Write header to new file (except for the very first file which already has it)
-			if fb.fileCounter > 1 && len(fb.header) > 0 {
-				if _, err := fb.gzipWriter.Write(fb.header); err != nil {
-					return fmt.Errorf("writing header to new file: %w", err)
-				}
-				fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
-			}
+	// Check for rotate condition before writing new data
+	if fileInfo.Size() >= fb.maxFileSize {
+		nextBlockOffset := int(0)
+		if fb.blockFormat != nil {
+			nextBlockOffset = fb.findBlockHeader(data)
 		}
-
-		// Flush to ensure data is written to file
-		if err := fb.gzipWriter.Flush(); err != nil {
-			return fmt.Errorf("flushing gzip writer: %w", err)
-		}
-
-		// Check actual file size on disk
-		fileInfo, err := fb.currentFile.Stat()
+		//write up to nextBlockOffset and rotate
+		n, err := fb.gzipWriter.Write(data[:nextBlockOffset])
 		if err != nil {
-			return fmt.Errorf("getting file stats: %w", err)
+			fmt.Fprintf(os.Stderr, "Writing to gzip: %w", err)
 		}
-
-		// Check if we need to start looking for block boundary
-		if fileInfo.Size() >= fb.maxFileSize {
-			if fb.blockFormat != nil {
-				// Start buffering data to find block boundary
-				fb.pendingData = append(fb.pendingData, data...)
-				return fb.flushPendingData()
-			} else {
-				// No block format, just close immediately
-				if err := fb.closeCurrentFile(); err != nil {
-					return err
-				}
-				// Continue to write remaining data in next iteration
-				continue
-			}
+		if n != nextBlockOffset {
+			fmt.Fprintf(os.Stderr, "Short write to gzip: wrote %d bytes, expected %d bytes", n, nextBlockOffset)
 		}
-
-		// Write data to gzip writer
-		n, err := fb.gzipWriter.Write(data)
-		if err != nil {
-			return fmt.Errorf("writing to gzip: %w", err)
-		}
+		fb.closeCurrentFile()
 		data = data[n:]
+		fb.openNewFile()
 	}
-	return nil
+
+	// Write data to gzip writer
+	n, err := fb.gzipWriter.Write(data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Writing to gzip: %w", err)
+	}
+	if n != len(data) {
+		fmt.Fprintf(os.Stderr, "Short write to gzip: wrote %d bytes, expected %d bytes", n, len(data))
+	}
 }
 
-func (fb *FileBuffer) flushPendingData() error {
-	// Try to find a valid block header in pending data
+func (fb *FileBuffer) findBlockHeader(data []byte) int {
 	if fb.blockFormat == nil {
-		return fmt.Errorf("internal error: flushPendingData called without block format")
+		fmt.Fprintf(os.Stderr, "Internal error: findBlockHeader called without block format")
+		return len(data)
 	}
-
-	maxScanSize := fb.maxBlockSize + fb.blockFormat.TotalBytes
 
 	// Search for valid block header
-	for offset := 0; offset <= len(fb.pendingData)-fb.blockFormat.TotalBytes; offset++ {
-		if blockLen, valid := fb.validateBlockHeader(fb.pendingData[offset:]); valid {
-			// Found valid header! Write until end of this block
-			endOfBlock := offset + fb.blockFormat.TotalBytes + blockLen
-
-			if endOfBlock > len(fb.pendingData) {
-				// Need more data to complete this block
-				// Wait for more data
-				return nil
-			}
-
-			// Write everything up to and including this block
-			if _, err := fb.gzipWriter.Write(fb.pendingData[:endOfBlock]); err != nil {
-				return fmt.Errorf("writing pending data: %w", err)
-			}
-
-			// Close current file and start new one
-			if err := fb.closeCurrentFile(); err != nil {
-				return err
-			}
-
-			// Keep remaining data for next file
-			fb.pendingData = fb.pendingData[endOfBlock:]
-
-			// Continue writing remaining data
-			if len(fb.pendingData) > 0 {
-				remaining := fb.pendingData
-				fb.pendingData = nil
-				return fb.write(remaining)
-			}
-
-			fb.pendingData = nil
-			return nil
+	for offset := 0; offset <= len(data)-fb.blockFormat.TotalBytes; offset++ {
+		if valid := fb.validateBlockHeader(data[offset:]); valid {
+			return offset
 		}
 	}
 
-	// No valid header found yet
-	if len(fb.pendingData) > maxScanSize {
-		fmt.Fprintf(os.Stderr, "Warning: no valid block header found within %d bytes, forcing rotation\n", maxScanSize)
-		return fb.forceRotation()
-	}
-
-	// Wait for more data
-	return nil
+	fmt.Fprintf(os.Stderr, "Warning: no valid block header found (to split on) in read buffer. Try a bigger buffer?\n")
+	return len(data)
 }
 
-func (fb *FileBuffer) forceRotation() error {
-	// Write all pending data and rotate
-	if len(fb.pendingData) > 0 {
-		if _, err := fb.gzipWriter.Write(fb.pendingData); err != nil {
-			return fmt.Errorf("writing pending data on forced rotation: %w", err)
-		}
-	}
-	fb.pendingData = nil
-	return fb.closeCurrentFile()
-}
-
-func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
+func (fb *FileBuffer) validateBlockHeader(data []byte) bool {
 	if len(data) < fb.blockFormat.TotalBytes {
-		return 0, false
+		return false
 	}
 
 	now := time.Now().Unix()
 	offset := 0
-	blockLength := 0
 
-	for i, field := range fb.blockFormat.Fields {
+	for _, field := range fb.blockFormat.Fields {
 		var value uint64
 
 		switch field.Width {
 		case 8:
 			if offset+1 > len(data) {
-				return 0, false
+				return false
 			}
 			value = uint64(data[offset])
 			offset += 1
 		case 16:
 			if offset+2 > len(data) {
-				return 0, false
+				return false
 			}
 			if fb.blockFormat.Endianness == LittleEndian {
 				value = uint64(binary.LittleEndian.Uint16(data[offset:]))
@@ -546,7 +481,7 @@ func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
 			offset += 2
 		case 32:
 			if offset+4 > len(data) {
-				return 0, false
+				return false
 			}
 			if fb.blockFormat.Endianness == LittleEndian {
 				value = uint64(binary.LittleEndian.Uint32(data[offset:]))
@@ -556,7 +491,7 @@ func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
 			offset += 4
 		case 64:
 			if offset+8 > len(data) {
-				return 0, false
+				return false
 			}
 			if fb.blockFormat.Endianness == LittleEndian {
 				value = binary.LittleEndian.Uint64(data[offset:])
@@ -572,44 +507,40 @@ func (fb *FileBuffer) validateBlockHeader(data []byte) (int, bool) {
 			// Within ±48 hours
 			diff := int64(value) - now
 			if diff < -48*3600 || diff > 48*3600 {
-				return 0, false
+				return false
 			}
 		case FieldUsec:
 			if value > 999999 {
-				return 0, false
+				return false
 			}
 		case FieldNsec:
 			if value > 999999999 {
-				return 0, false
+				return false
 			}
 		case FieldLength:
 			if value > uint64(fb.maxBlockSize) {
-				return 0, false
+				return false
 			}
-			blockLength = int(value)
 		case FieldMagic:
 			if value != field.MagicValue {
-				return 0, false
+				return false
 			}
 		case FieldIgnore:
 			// Any value is okay
 		}
-
-		// Store length if this is the length field
-		if i == fb.blockFormat.LengthIndex && fb.blockFormat.HasLength {
-			blockLength = int(value)
-		}
 	}
 
-	return blockLength, true
+	return true
 }
 
-func (fb *FileBuffer) openNewFile() error {
+func (fb *FileBuffer) openNewFile() {
 	// Delete oldest file if we've reached the limit
 	if len(fb.activeFiles) >= fb.maxNumFiles {
 		oldestFile := fb.activeFiles[0]
 		if err := os.Remove(oldestFile); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing oldest file %s: %w", oldestFile, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to delete oldest file %s: %v\n", oldestFile, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Deleted oldest file: %s\n", oldestFile)
 		}
 		fb.activeFiles = fb.activeFiles[1:]
 	}
@@ -620,7 +551,8 @@ func (fb *FileBuffer) openNewFile() error {
 	// Create file
 	f, err := os.Create(filename)
 	if err != nil {
-		return fmt.Errorf("creating file %s: %w", filename, err)
+		fmt.Fprintf(os.Stderr, "Creating file %s: %w", filename, err)
+		os.Exit(1)
 	}
 
 	// Store file handle and create NEW gzip writer for this file with specified compression level
@@ -628,7 +560,8 @@ func (fb *FileBuffer) openNewFile() error {
 	gzWriter, err := gzip.NewWriterLevel(f, fb.compressionLevel)
 	if err != nil {
 		f.Close()
-		return fmt.Errorf("creating gzip writer: %w", err)
+		fmt.Fprintf(os.Stderr, "Creating gzip writer for file %s: %w", filename, err)
+		os.Exit(1)
 	}
 	fb.gzipWriter = gzWriter
 	fb.fileCounter++
@@ -636,12 +569,19 @@ func (fb *FileBuffer) openNewFile() error {
 
 	fmt.Fprintf(os.Stderr, "Created new file: %s (counter: %d, compression: %d)\n", filename, fb.fileCounter, fb.compressionLevel)
 
-	return nil
+	// Write header to new files if it's been captured
+	if fb.headerCaptured && fb.headerBytes > 0 {
+		if _, err := fb.gzipWriter.Write(fb.header); err != nil {
+			fmt.Fprintf(os.Stderr, "Writing header to file %s: %w", filename, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
+	}
 }
 
-func (fb *FileBuffer) closeCurrentFile() error {
+func (fb *FileBuffer) closeCurrentFile() {
 	if fb.gzipWriter == nil && fb.currentFile == nil {
-		return nil
+		return
 	}
 
 	// Close gzip writer first to flush compressed data
@@ -650,7 +590,7 @@ func (fb *FileBuffer) closeCurrentFile() error {
 			if fb.currentFile != nil {
 				fb.currentFile.Close()
 			}
-			return fmt.Errorf("closing gzip writer: %w", err)
+			fmt.Fprintf(os.Stderr, "Closing gzip writer: %w", err)
 		}
 		fb.gzipWriter = nil
 	}
@@ -658,12 +598,10 @@ func (fb *FileBuffer) closeCurrentFile() error {
 	// Close the file
 	if fb.currentFile != nil {
 		if err := fb.currentFile.Close(); err != nil {
-			return fmt.Errorf("closing file: %w", err)
+			fmt.Fprintf(os.Stderr, "Closing file: %w", err)
 		}
 		fb.currentFile = nil
 	}
-
-	return nil
 }
 
 func (fb *FileBuffer) generateFilename() string {
@@ -687,7 +625,7 @@ func (fb *FileBuffer) generateFilename() string {
 }
 
 // Load existing files matching the pattern and initialize counter
-func (fb *FileBuffer) loadExistingFiles() error {
+func (fb *FileBuffer) loadExistingFiles() {
 	// Build regex pattern for matching files
 	ext := filepath.Ext(fb.filePrefix)
 	nameWithoutExt := strings.TrimSuffix(fb.filePrefix, ext)
@@ -703,7 +641,8 @@ func (fb *FileBuffer) loadExistingFiles() error {
 
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return fmt.Errorf("compiling regex pattern: %w", err)
+		fmt.Fprintf(os.Stderr, "Compiling regex pattern: %w", err)
+		return
 	}
 
 	// Get directory and base name for globbing
@@ -717,9 +656,10 @@ func (fb *FileBuffer) loadExistingFiles() error {
 	if err != nil {
 		// If directory doesn't exist, that's okay - no files to load
 		if os.IsNotExist(err) {
-			return nil
+			return
 		}
-		return fmt.Errorf("reading directory: %w", err)
+		fmt.Fprintf(os.Stderr, "Reading directory %s: %w", dir, err)
+		return
 	}
 
 	// Find and parse matching files
@@ -788,6 +728,4 @@ func (fb *FileBuffer) loadExistingFiles() error {
 		fmt.Fprintf(os.Stderr, "Loaded %d existing file(s), resuming from counter %d\n",
 			len(fb.activeFiles), fb.fileCounter)
 	}
-
-	return nil
 }
