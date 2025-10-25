@@ -383,7 +383,7 @@ func (fb *FileBuffer) write(data []byte) {
 	if !fb.headerCaptured && fb.headerBytes > 0 {
 		bytesToCapture := fb.headerBytes
 		if len(data) < fb.headerBytes {
-			fmt.Fprintf(os.Stderr, "Insufficient data to capture header: need %d bytes, got %d bytes", fb.headerBytes, len(data))
+			fmt.Fprintf(os.Stderr, "Error: Insufficient data to capture header: need %d bytes, got %d bytes", fb.headerBytes, len(data))
 			bytesToCapture = len(data)
 		}
 
@@ -396,13 +396,13 @@ func (fb *FileBuffer) write(data []byte) {
 
 	// Flush to ensure data is written to file
 	if err := fb.gzipWriter.Flush(); err != nil {
-		fmt.Fprintf(os.Stderr, "Flushing gzip writer: %w", err)
+		fmt.Fprintf(os.Stderr, "Error flushing gzip writer: %s", err.Error())
 	}
 
 	// Check actual file size on disk
 	fileInfo, err := fb.currentFile.Stat()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Getting file stats: %w", err)
+		fmt.Fprintf(os.Stderr, "Error getting file stats: %s", err.Error())
 	}
 
 	// Check for rotate condition before writing new data
@@ -414,10 +414,10 @@ func (fb *FileBuffer) write(data []byte) {
 		//write up to nextBlockOffset and rotate
 		n, err := fb.gzipWriter.Write(data[:nextBlockOffset])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Writing to gzip: %w", err)
+			fmt.Fprintf(os.Stderr, "Error writing to gzip: %s", err.Error())
 		}
 		if n != nextBlockOffset {
-			fmt.Fprintf(os.Stderr, "Short write to gzip: wrote %d bytes, expected %d bytes", n, nextBlockOffset)
+			fmt.Fprintf(os.Stderr, "Error: short write to gzip: wrote %d bytes, expected %d bytes", n, nextBlockOffset)
 		}
 		fb.closeCurrentFile()
 		data = data[n:]
@@ -427,10 +427,10 @@ func (fb *FileBuffer) write(data []byte) {
 	// Write data to gzip writer
 	n, err := fb.gzipWriter.Write(data)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Writing to gzip: %w", err)
+		fmt.Fprintf(os.Stderr, "Error writing to gzip: %s", err.Error())
 	}
 	if n != len(data) {
-		fmt.Fprintf(os.Stderr, "Short write to gzip: wrote %d bytes, expected %d bytes", n, len(data))
+		fmt.Fprintf(os.Stderr, "Error: short write to gzip: wrote %d bytes, expected %d bytes", n, len(data))
 	}
 }
 
@@ -551,7 +551,7 @@ func (fb *FileBuffer) openNewFile() {
 	// Create file
 	f, err := os.Create(filename)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Creating file %s: %w", filename, err)
+		fmt.Fprintf(os.Stderr, "Error creating file %s: %s", filename, err.Error())
 		os.Exit(1)
 	}
 
@@ -560,7 +560,7 @@ func (fb *FileBuffer) openNewFile() {
 	gzWriter, err := gzip.NewWriterLevel(f, fb.compressionLevel)
 	if err != nil {
 		f.Close()
-		fmt.Fprintf(os.Stderr, "Creating gzip writer for file %s: %w", filename, err)
+		fmt.Fprintf(os.Stderr, "Error creating gzip writer for file %s: %s", filename, err.Error())
 		os.Exit(1)
 	}
 	fb.gzipWriter = gzWriter
@@ -572,7 +572,7 @@ func (fb *FileBuffer) openNewFile() {
 	// Write header to new files if it's been captured
 	if fb.headerCaptured && fb.headerBytes > 0 {
 		if _, err := fb.gzipWriter.Write(fb.header); err != nil {
-			fmt.Fprintf(os.Stderr, "Writing header to file %s: %w", filename, err)
+			fmt.Fprintf(os.Stderr, "Error writing header to file %s: %s", filename, err.Error())
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
@@ -590,7 +590,7 @@ func (fb *FileBuffer) closeCurrentFile() {
 			if fb.currentFile != nil {
 				fb.currentFile.Close()
 			}
-			fmt.Fprintf(os.Stderr, "Closing gzip writer: %w", err)
+			fmt.Fprintf(os.Stderr, "Error closing gzip writer: %s", err.Error())
 		}
 		fb.gzipWriter = nil
 	}
@@ -598,7 +598,7 @@ func (fb *FileBuffer) closeCurrentFile() {
 	// Close the file
 	if fb.currentFile != nil {
 		if err := fb.currentFile.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "Closing file: %w", err)
+			fmt.Fprintf(os.Stderr, "Error closing file: %s", err.Error())
 		}
 		fb.currentFile = nil
 	}
@@ -641,7 +641,7 @@ func (fb *FileBuffer) loadExistingFiles() {
 
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Compiling regex pattern: %w", err)
+		fmt.Fprintf(os.Stderr, "Error compiling regex pattern: %s", err.Error())
 		return
 	}
 
@@ -658,7 +658,7 @@ func (fb *FileBuffer) loadExistingFiles() {
 		if os.IsNotExist(err) {
 			return
 		}
-		fmt.Fprintf(os.Stderr, "Reading directory %s: %w", dir, err)
+		fmt.Fprintf(os.Stderr, "Error reading directory %s: %s", dir, err.Error())
 		return
 	}
 
