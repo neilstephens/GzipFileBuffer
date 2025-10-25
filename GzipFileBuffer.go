@@ -54,6 +54,7 @@ type FileBuffer struct {
 	maxFileSize    int64
 	maxNumFiles    int
 	timeFormat     string
+	useLocalTime   bool
 	headerBytes    int
 	header         []byte
 	headerCaptured bool
@@ -72,6 +73,7 @@ func main() {
 	numFiles := flag.Int("num_files", 0, "Maximum number of files to keep (required)")
 	filePrefix := flag.String("file_prefix", "", "Prefix for output files (required)")
 	timeFormat := flag.String("time_format", "2006-01-02T15:04:05.000Z", "Time format for filenames (Go time layout)")
+	useLocalTime := flag.Bool("local_time", false, "Use local time instead of UTC for timestamps")
 	headerBytes := flag.Int("header_bytes", 0, "Number of bytes from start of stream to copy as header for each file (default: 0)")
 	blockHeader := flag.String("block_header", "", "Block header format for boundary detection (e.g., <u32:sec><u32:usec><u32:length><u32>)")
 	maxBlockSize := flag.Int("max_block_size", 262144, "Maximum block size in bytes when scanning for boundaries (default: 262144 / 256KB)")
@@ -178,6 +180,7 @@ func main() {
 		maxBlockSize: *maxBlockSize,
 		activeFiles:  make([]string, 0, *numFiles),
 		pendingData:  make([]byte, 0),
+		useLocalTime:   *useLocalTime,
 	}
 
 	// Parse block header format if provided
@@ -572,9 +575,12 @@ func (fb *FileBuffer) closeCurrentFile() error {
 }
 
 func (fb *FileBuffer) generateFilename() string {
-
-	//TODO: option for local time vs UTC
-	timestamp := time.Now().UTC().Format(fb.timeFormat)
+	var timestamp string
+	if fb.useLocalTime {
+		timestamp = time.Now().Local().Format(fb.timeFormat)
+	} else {
+		timestamp = time.Now().UTC().Format(fb.timeFormat)
+	}
 
 	// Split prefix into name and extension
 	ext := filepath.Ext(fb.filePrefix)
