@@ -60,7 +60,8 @@ type FileBuffer struct {
 	headerCaptured bool
 	blockFormat    *BlockHeaderFormat
 	maxBlockSize   int
-	pendingData    []byte // Buffer for data while searching for block boundary
+	readBufferSize int
+	pendingData    []byte
 	currentFile    *os.File
 	gzipWriter     *gzip.Writer
 	currentSize    int64
@@ -77,6 +78,7 @@ func main() {
 	headerBytes := flag.Int("header_bytes", 0, "Number of bytes from start of stream to copy as header for each file (default: 0)")
 	blockHeader := flag.String("block_header", "", "Block header format for boundary detection (e.g., <u32:sec><u32:usec><u32:length><u32>)")
 	maxBlockSize := flag.Int("max_block_size", 262144, "Maximum block size in bytes when scanning for boundaries (default: 262144 / 256KB)")
+	readBufferSize := flag.Int("read_buffer_size", 32768, "Read buffer size in bytes (default: 32768 / 32KB)")
 	endianness := flag.String("endianness", "little", "Byte order for multi-byte fields: 'little' or 'big' (default: little)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
 
@@ -158,6 +160,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: --max_block_size must be positive")
 		os.Exit(1)
 	}
+	if *readBufferSize <= 0 {
+		fmt.Fprintln(os.Stderr, "Error: --read_buffer_size must be positive")
+		os.Exit(1)
+	}
 
 	// Validate endianness
 	var byteOrder Endianness
@@ -172,15 +178,16 @@ func main() {
 	}
 
 	fb := &FileBuffer{
-		filePrefix:   *filePrefix,
-		maxFileSize:  *fileSizeKB * 1024, // Convert KB to bytes
-		maxNumFiles:  *numFiles,
-		timeFormat:   *timeFormat,
-		headerBytes:  *headerBytes,
-		maxBlockSize: *maxBlockSize,
-		activeFiles:  make([]string, 0, *numFiles),
-		pendingData:  make([]byte, 0),
+		filePrefix:     *filePrefix,
+		maxFileSize:    *fileSizeKB * 1024, // Convert KB to bytes
+		maxNumFiles:    *numFiles,
+		timeFormat:     *timeFormat,
 		useLocalTime:   *useLocalTime,
+		headerBytes:    *headerBytes,
+		maxBlockSize:   *maxBlockSize,
+		readBufferSize: *readBufferSize,
+		activeFiles:    make([]string, 0, *numFiles),
+		pendingData:    make([]byte, 0),
 	}
 
 	// Parse block header format if provided
@@ -274,8 +281,7 @@ func parseBlockHeaderFormat(format string, endianness Endianness) (*BlockHeaderF
 func (fb *FileBuffer) run() error {
 	defer fb.closeCurrentFile()
 
-	//TODO: make read buffer size configurable
-	buf := make([]byte, 32*1024) //32kB
+	buf := make([]byte, fb.readBufferSize)
 
 	for {
 		n, err := os.Stdin.Read(buf)
