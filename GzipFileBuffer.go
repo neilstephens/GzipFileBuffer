@@ -30,8 +30,10 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigChan
-		fmt.Fprintf(os.Stderr, "Main: Received signal: %v. Initiating graceful shutdown...\n", sig)
-		fmt.Fprintf(os.Stderr, "Main: Press Ctrl+C again to force exit (will lose unprocessed data).\n")
+		if !fb.quiet {
+			fmt.Fprintf(os.Stderr, "Main: Received signal: %v. Initiating graceful shutdown...\n", sig)
+			fmt.Fprintf(os.Stderr, "Main: Press Ctrl+C again to force exit (will lose unprocessed data).\n")
+		}
 		os.Stdin.Close()
 		<-sigChan
 		fmt.Fprintf(os.Stderr, "Main: Received second signal. Forcing exit.\n")
@@ -45,7 +47,9 @@ func main() {
 	go reader(dataChannel, fb.readBufferSize)
 	wg.Wait()
 	fb.closeCurrentFile()
-	fmt.Fprintf(os.Stderr, "Main: Shutdown cleanly.\n")
+	if !fb.quiet {
+		fmt.Fprintf(os.Stderr, "Main: Shutdown cleanly.\n")
+	}
 }
 
 // "producer" goroutine.
@@ -101,7 +105,9 @@ func processor(dataChannel <-chan []byte, fb *FileBuffer, wg *sync.WaitGroup) {
 
 	// After the channel is closed, there might be some data left
 	if len(processingBuffer) > 0 {
-		fmt.Fprintf(os.Stderr, "Processing final %d bytes of data\n", len(processingBuffer))
+		if !fb.quiet {
+			fmt.Fprintf(os.Stderr, "Processing final %d bytes of data\n", len(processingBuffer))
+		}
 		fb.write(processingBuffer)
 	}
 }

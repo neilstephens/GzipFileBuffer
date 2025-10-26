@@ -34,6 +34,7 @@ type FileBuffer struct {
 	fileCounter      int
 	activeFiles      []string
 	resumeExisting   bool
+	quiet            bool
 }
 
 func (fb *FileBuffer) write(data []byte) {
@@ -49,7 +50,9 @@ func (fb *FileBuffer) write(data []byte) {
 		copy(fb.header, data[:bytesToCapture])
 		fb.headerCaptured = true
 
-		fmt.Fprintf(os.Stderr, "Captured %d header bytes from stream\n", fb.headerBytes)
+		if !fb.quiet {
+			fmt.Fprintf(os.Stderr, "Captured %d header bytes from stream\n", fb.headerBytes)
+		}
 	}
 
 	// Flush to ensure data is written to file
@@ -99,7 +102,9 @@ func (fb *FileBuffer) openNewFile() {
 		if err := os.Remove(oldestFile); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Warning: failed to delete oldest file %s: %v\n", oldestFile, err)
 		} else {
-			fmt.Fprintf(os.Stderr, "Deleted oldest file: %s\n", oldestFile)
+			if !fb.quiet {
+				fmt.Fprintf(os.Stderr, "Deleted oldest file: %s\n", oldestFile)
+			}
 		}
 		fb.activeFiles = fb.activeFiles[1:]
 	}
@@ -126,7 +131,9 @@ func (fb *FileBuffer) openNewFile() {
 	fb.fileCounter++
 	fb.activeFiles = append(fb.activeFiles, filename)
 
-	fmt.Fprintf(os.Stderr, "Created new file: %s (counter: %d, compression: %d)\n", filename, fb.fileCounter, fb.compressionLevel)
+	if !fb.quiet {
+		fmt.Fprintf(os.Stderr, "Created new file: %s (counter: %d, compression: %d)\n", filename, fb.fileCounter, fb.compressionLevel)
+	}
 
 	// Write header to new files if it's been captured
 	if fb.headerCaptured && fb.headerBytes > 0 {
@@ -134,7 +141,9 @@ func (fb *FileBuffer) openNewFile() {
 			fmt.Fprintf(os.Stderr, "Error writing header to file %s: %s", filename, err.Error())
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
+		if !fb.quiet {
+			fmt.Fprintf(os.Stderr, "Wrote %d header bytes to file\n", len(fb.header))
+		}
 	}
 }
 
@@ -283,7 +292,9 @@ func (fb *FileBuffer) loadExistingFiles() {
 	}
 
 	if len(fb.activeFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "Loaded %d existing file(s), resuming from counter %d\n",
-			len(fb.activeFiles), fb.fileCounter)
+		if !fb.quiet {
+			fmt.Fprintf(os.Stderr, "Loaded %d existing file(s), resuming from counter %d\n",
+				len(fb.activeFiles), fb.fileCounter)
+		}
 	}
 }

@@ -25,6 +25,7 @@ func processArgs() *FileBuffer {
 	compressionLevel := flag.Int("compression_level", gzip.DefaultCompression, "Gzip compression level: -1 (default), 0 (none), 1 (best speed) to 9 (best compression)")
 	endianness := flag.String("endianness", "little", "Byte order for multi-byte fields: 'little' or 'big' (default: little)")
 	resumeExisting := flag.Bool("resume_existing", false, "Resume with existing files (WARNING: may delete matching files if count exceeds num_files)")
+	quiet := flag.Bool("quiet", false, "Suppress non-error output")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "GzipFileBuffer - Stream stdin to rotating gzip-compressed files\n\n")
@@ -156,6 +157,7 @@ func processArgs() *FileBuffer {
 		compressionLevel: *compressionLevel,
 		activeFiles:      make([]string, 0, *numFiles),
 		resumeExisting:   *resumeExisting,
+		quiet:            *quiet,
 	}
 
 	// Parse block header format if provided
