@@ -167,7 +167,9 @@ func processArgs() *FileBuffer {
 		if byteOrder == BigEndian {
 			endianStr = "big-endian"
 		}
-		fmt.Fprintf(os.Stderr, "Block header format: %d bytes, %d fields (%s)\n", fb.blockFormat.TotalBytes, len(fb.blockFormat.Fields), endianStr)
+		if !fb.quiet {
+			fmt.Fprintf(os.Stderr, "Block header format: %d bytes, %d fields (%s)\n", fb.blockFormat.TotalBytes, len(fb.blockFormat.Fields), endianStr)
+		}
 	}
 
 	return fb
